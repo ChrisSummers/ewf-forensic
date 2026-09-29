@@ -327,6 +327,23 @@ mod tests {
     }
 
     #[test]
+    fn volume_section_sector_size_is_reported() {
+        // Re-declare the one 32 KiB chunk as 8 sectors of 4096 bytes, as a 4Kn
+        // acquisition writes it. Volume data starts at offset 89: sectors per
+        // chunk at +8, bytes per sector at +12, sector count at +16.
+        let tmp = build_synthetic_e01(b"4Kn");
+        let mut bytes = std::fs::read(tmp.path()).unwrap();
+        bytes[97..101].copy_from_slice(&8u32.to_le_bytes());
+        bytes[101..105].copy_from_slice(&4096u32.to_le_bytes());
+        bytes[105..113].copy_from_slice(&8u64.to_le_bytes());
+        std::fs::write(tmp.path(), &bytes).unwrap();
+        let reader = EwfReader::open(tmp.path()).unwrap();
+        assert_eq!(reader.bytes_per_sector(), 4096);
+        assert_eq!(reader.chunk_size(), 32768);
+        assert_eq!(reader.total_size(), 32768);
+    }
+
+    #[test]
     fn large_volume_chunk_count_is_accepted() {
         // 5M chunks (× 32 KB ≈ 160 GB) exceeds the old 4M cap. A real >128 GB
         // image must open — the header count is a hint, the table is the truth.
@@ -2371,10 +2388,10 @@ mod tests {
         let mut cs = 0u64;
         let mut ts = 0u64;
         // Empty data
-        parse_ewf2_device_info(&[], &mut cs, &mut ts);
+        parse_ewf2_device_info(&[], &mut cs, &mut ts, &mut 0);
         assert_eq!(cs, 0);
         // 1 byte (too short for UTF-16)
-        parse_ewf2_device_info(&[0x41], &mut cs, &mut ts);
+        parse_ewf2_device_info(&[0x41], &mut cs, &mut ts, &mut 0);
         assert_eq!(cs, 0);
     }
 
@@ -2386,7 +2403,7 @@ mod tests {
         // UTF-16LE "hi\n" — only 1 line, need 4
         let text = "hi\n";
         let utf16: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
-        parse_ewf2_device_info(&utf16, &mut cs, &mut ts);
+        parse_ewf2_device_info(&utf16, &mut cs, &mut ts, &mut 0);
         assert_eq!(cs, 0);
     }
 
@@ -2398,9 +2415,31 @@ mod tests {
         // Valid format but with unknown field names alongside known ones
         let text = "2\nmain\nb\tsc\tts\txyz\n512\t64\t128\tignored\n\n";
         let utf16: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
-        parse_ewf2_device_info(&utf16, &mut cs, &mut ts);
+        parse_ewf2_device_info(&utf16, &mut cs, &mut ts, &mut 0);
         assert_eq!(cs, 512 * 64);
         assert_eq!(ts, 512 * 128);
+    }
+
+    #[test]
+    fn parse_ewf2_device_info_reports_a_4kn_sector_size() {
+        use crate::reader::parse_ewf2_device_info;
+        let (mut cs, mut ts, mut bps) = (0u64, 0u64, 0u32);
+        let text = "2\nmain\nb\tsc\tts\n4096\t8\t1000\n";
+        let utf16: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        parse_ewf2_device_info(&utf16, &mut cs, &mut ts, &mut bps);
+        assert_eq!(bps, 4096);
+        assert_eq!(cs, 4096 * 8);
+        assert_eq!(ts, 4096 * 1000);
+    }
+
+    #[test]
+    fn parse_ewf2_device_info_zero_bytes_per_sector_leaves_sector_size() {
+        use crate::reader::parse_ewf2_device_info;
+        let (mut cs, mut ts, mut bps) = (0u64, 0u64, 0u32);
+        let text = "2\nmain\nb\tsc\tts\n0\t64\t128\n";
+        let utf16: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        parse_ewf2_device_info(&utf16, &mut cs, &mut ts, &mut bps);
+        assert_eq!(bps, 0, "a zero declaration must not become the sector size");
     }
 
     #[test]
@@ -2412,7 +2451,7 @@ mod tests {
         let mut ts: u64 = 0;
         let text = "2\nmain\nb\tsc\tts\n0\t64\t128\n";
         let utf16: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
-        parse_ewf2_device_info(&utf16, &mut cs, &mut ts);
+        parse_ewf2_device_info(&utf16, &mut cs, &mut ts, &mut 0);
         assert_eq!(
             cs, 99999,
             "chunk_size should be unchanged when bytes_per_sector=0"
@@ -2430,7 +2469,7 @@ mod tests {
         let mut ts: u64 = 0;
         let text = "2\nmain\nb\tsc\tts\n512\t0\t128\n";
         let utf16: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
-        parse_ewf2_device_info(&utf16, &mut cs, &mut ts);
+        parse_ewf2_device_info(&utf16, &mut cs, &mut ts, &mut 0);
         assert_eq!(
             cs, 99999,
             "chunk_size should be unchanged when sectors_per_chunk=0"

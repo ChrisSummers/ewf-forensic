@@ -294,6 +294,9 @@ pub struct EwfReader {
     chunks: ChunkTable,
     /// Chunk size in bytes (typically 32 KB).
     chunk_size: u64,
+    /// Bytes per sector of the acquired media, as the volume (EWF1) or
+    /// `device_info` (EWF2) section declares it; 512 when the image is silent.
+    bytes_per_sector: u32,
     /// Total logical image size in bytes.
     total_size: u64,
     /// Current read position (for Read + Seek).
@@ -422,6 +425,7 @@ impl EwfReader {
         // Walk section descriptors in each segment
         let mut chunk_size: u64 = 0;
         let mut total_size: u64 = 0;
+        let mut bytes_per_sector: u32 = 0;
         let mut chunks: Vec<Chunk> = Vec::new();
         let mut index: Vec<SectionMeta> = Vec::new();
         let mut next_chunk_id: usize = 0;
@@ -486,6 +490,7 @@ impl EwfReader {
                             ));
                         }
                         chunk_size = cs;
+                        bytes_per_sector = vol.bytes_per_sector;
                         total_size = vol.total_size();
                         if total_size == 0 {
                             total_size = chunk_size * u64::from(vol.chunk_count);
@@ -659,6 +664,7 @@ impl EwfReader {
             segments: ordered_segments,
             chunks,
             chunk_size,
+            bytes_per_sector: declared_or_default(bytes_per_sector),
             total_size,
             position: 0,
             cache,
@@ -739,6 +745,7 @@ impl EwfReader {
 
         let mut chunk_size: u64 = 0;
         let mut total_size: u64 = 0;
+        let mut bytes_per_sector: u32 = 0;
         let mut chunks: Vec<Chunk> = Vec::new();
         let mut stored_md5: Option<[u8; 16]> = None;
         let mut stored_sha1: Option<[u8; 20]> = None;
@@ -796,7 +803,12 @@ impl EwfReader {
                         let mut buf = vec![0u8; desc.data_size as usize];
                         file.read_exact(&mut buf)?;
                         let raw = maybe_zlib_decompress(&buf)?;
-                        parse_ewf2_device_info(&raw, &mut chunk_size, &mut total_size);
+                        parse_ewf2_device_info(
+                            &raw,
+                            &mut chunk_size,
+                            &mut total_size,
+                            &mut bytes_per_sector,
+                        );
                         log::debug!(
                             "parsed v2 device_info: chunk_size={chunk_size}, total_size={total_size}"
                         );
@@ -906,6 +918,7 @@ impl EwfReader {
             segments,
             chunks: ChunkTable::Eager(chunks),
             chunk_size,
+            bytes_per_sector: declared_or_default(bytes_per_sector),
             total_size,
             position: 0,
             cache,
@@ -926,6 +939,15 @@ impl EwfReader {
     #[must_use]
     pub fn chunk_size(&self) -> u64 {
         self.chunk_size
+    }
+
+    /// Bytes per sector of the acquired media: 512 for most drives, 4096 for
+    /// 4Kn media. Callers that locate partition tables or filesystem structures
+    /// by sector need this rather than assuming 512. Falls back to 512 when
+    /// the image does not declare it.
+    #[must_use]
+    pub fn bytes_per_sector(&self) -> u32 {
+        self.bytes_per_sector
     }
 
     /// Number of chunks in the image.
@@ -1226,6 +1248,15 @@ impl Seek for EwfReader {
     }
 }
 
+/// The sector size an image declared, or 512 when it declared none.
+fn declared_or_default(bytes_per_sector: u32) -> u32 {
+    if bytes_per_sector == 0 {
+        512
+    } else {
+        bytes_per_sector
+    }
+}
+
 /// Parse EWF2 `device_info` section data (UTF-16LE tab-separated text) to extract
 /// `bytes_per_sector`, `sectors_per_chunk`, and `total_sectors` for media geometry.
 ///
@@ -1234,7 +1265,12 @@ impl Seek for EwfReader {
 ///   Line 2: section name ("main")
 ///   Line 3: field names (tab-separated, e.g. "b\tsc\tts")
 ///   Line 4: field values (tab-separated)
-pub(crate) fn parse_ewf2_device_info(raw: &[u8], chunk_size: &mut u64, total_size: &mut u64) {
+pub(crate) fn parse_ewf2_device_info(
+    raw: &[u8],
+    chunk_size: &mut u64,
+    total_size: &mut u64,
+    sector_size: &mut u32,
+) {
     // Decode UTF-16LE to String
     if raw.len() < 2 {
         return;
@@ -1281,6 +1317,9 @@ pub(crate) fn parse_ewf2_device_info(raw: &[u8], chunk_size: &mut u64, total_siz
         }
     }
 
+    if let Some(declared) = u32::try_from(bytes_per_sector).ok().filter(|&b| b > 0) {
+        *sector_size = declared;
+    }
     let computed_chunk_size = bytes_per_sector * sectors_per_chunk;
     if computed_chunk_size > 0 {
         *chunk_size = computed_chunk_size;
@@ -1339,6 +1378,7 @@ impl std::fmt::Debug for EwfReader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EwfReader")
             .field("chunk_size", &self.chunk_size)
+            .field("bytes_per_sector", &self.bytes_per_sector)
             .field("total_size", &self.total_size)
             .field("position", &self.position)
             .field("chunk_count", &self.chunks.len())
