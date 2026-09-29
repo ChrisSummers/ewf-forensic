@@ -1039,7 +1039,8 @@ mod tests {
         let tbl_entries_offset: u64 = tbl_hdr_offset + 24;
         let sectors_desc_offset: u64 = tbl_entries_offset + 4;
         let sectors_data_offset: u64 = sectors_desc_offset + SECTION_DESCRIPTOR_SIZE as u64;
-        let done_desc_offset: u64 = sectors_data_offset + u64::from(chunk_size);
+        // An uncompressed v1 chunk is followed by the Adler-32 of its data.
+        let done_desc_offset: u64 = sectors_data_offset + u64::from(chunk_size) + 4;
 
         let mut file_data = Vec::new();
 
@@ -1087,12 +1088,13 @@ mod tests {
         sec_desc[..7].copy_from_slice(b"sectors");
         sec_desc[16..24].copy_from_slice(&done_desc_offset.to_le_bytes());
         sec_desc[24..32].copy_from_slice(
-            &(SECTION_DESCRIPTOR_SIZE as u64 + u64::from(chunk_size)).to_le_bytes(),
+            &(SECTION_DESCRIPTOR_SIZE as u64 + u64::from(chunk_size) + 4).to_le_bytes(),
         );
         file_data.extend_from_slice(&sec_desc);
 
-        // Raw chunk data (uncompressed)
+        // Raw chunk data (uncompressed), then its Adler-32
         file_data.extend_from_slice(&padded);
+        file_data.extend_from_slice(&crate::sections::adler32(&padded).to_le_bytes());
 
         // Done descriptor
         let mut done_desc = [0u8; SECTION_DESCRIPTOR_SIZE];

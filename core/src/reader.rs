@@ -296,6 +296,9 @@ pub struct EwfReader {
     chunk_size: u64,
     /// Total logical image size in bytes.
     total_size: u64,
+    /// Whether uncompressed chunks carry a trailing Adler-32 to verify: true for
+    /// EWF v1, whose uncompressed chunks store one after their data.
+    uncompressed_checksums: bool,
     /// Current read position (for Read + Seek).
     position: u64,
     /// LRU cache: `chunk_id` -> decompressed chunk data. `Mutex`-guarded so the
@@ -660,6 +663,7 @@ impl EwfReader {
             chunks,
             chunk_size,
             total_size,
+            uncompressed_checksums: true,
             position: 0,
             cache,
             stored_md5,
@@ -907,6 +911,7 @@ impl EwfReader {
             chunks: ChunkTable::Eager(chunks),
             chunk_size,
             total_size,
+            uncompressed_checksums: false,
             position: 0,
             cache,
             stored_md5,
@@ -1123,6 +1128,13 @@ impl EwfReader {
     /// + decompress, all through `&self`.
     fn decompress_chunk(&self, chunk_id: usize) -> Result<Vec<u8>> {
         let mut page = vec![0u8; self.chunk_size as usize];
+        // The bytes of this chunk the image addresses: a whole chunk, except the
+        // last, which ends with the media. Anything shorter would be served as
+        // zeros that the image never contained.
+        let expected = (self.chunk_size).min(
+            self.total_size
+                .saturating_sub(chunk_id as u64 * self.chunk_size),
+        ) as usize;
         let chunk = self.chunks.get(chunk_id, &self.segments)?;
         let src = self.segments.get(chunk.segment_idx()).ok_or_else(|| {
             EwfError::Parse(format!(
@@ -1147,6 +1159,11 @@ impl EwfReader {
                     }
                 }
             }
+            if total < expected {
+                return Err(EwfError::Decompression(format!(
+                    "chunk {chunk_id} inflated to {total} of {expected} bytes"
+                )));
+            }
         } else {
             let to_read = std::cmp::min(chunk.size() as usize, page.len());
             let n = src.read_at(&mut page[..to_read], chunk.offset())?;
@@ -1157,6 +1174,26 @@ impl EwfReader {
                     io::ErrorKind::UnexpectedEof,
                     format!("short read for chunk {chunk_id}: got {n} of {to_read} bytes"),
                 )));
+            }
+            if self.uncompressed_checksums {
+                let data = &page[..expected.min(to_read)];
+                let mut stored = [0u8; 4];
+                let n = src.read_at(&mut stored, chunk.offset() + data.len() as u64)?;
+                if n < stored.len() {
+                    return Err(EwfError::Io(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        format!("chunk {chunk_id} ends before its checksum"),
+                    )));
+                }
+                let stored = u32::from_le_bytes(stored);
+                let computed = crate::sections::adler32(data);
+                if stored != computed {
+                    return Err(EwfError::ChunkChecksum {
+                        chunk: chunk_id,
+                        stored,
+                        computed,
+                    });
+                }
             }
         }
 
@@ -1340,6 +1377,7 @@ impl std::fmt::Debug for EwfReader {
         f.debug_struct("EwfReader")
             .field("chunk_size", &self.chunk_size)
             .field("total_size", &self.total_size)
+            .field("uncompressed_checksums", &self.uncompressed_checksums)
             .field("position", &self.position)
             .field("chunk_count", &self.chunks.len())
             .field("segment_count", &self.segments.len())

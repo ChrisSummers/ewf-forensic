@@ -55,6 +55,18 @@ pub enum EwfError {
     #[error("decompression error: {0}")]
     Decompression(String),
 
+    /// An uncompressed EWF v1 chunk whose data does not match the Adler-32
+    /// stored after it. The chunk is corrupt; its bytes are not returned.
+    #[error("chunk {chunk} checksum mismatch: stored {stored:#010x}, computed {computed:#010x}")]
+    ChunkChecksum {
+        /// The chunk's index in the image.
+        chunk: usize,
+        /// The Adler-32 the image stores after the chunk.
+        stored: u32,
+        /// The Adler-32 of the chunk's data as read.
+        computed: u32,
+    },
+
     #[error("segment gap: expected segment {expected}, got {got}")]
     SegmentGap { expected: u32, got: u32 },
 

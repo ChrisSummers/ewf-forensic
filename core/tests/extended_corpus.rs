@@ -230,3 +230,42 @@ fn zeros_128s_compressed_matches_uncompressed_md5() {
         "compressed and uncompressed Ex01 images must yield identical media MD5"
     );
 }
+
+// ── Uncompressed-chunk integrity (EWF v1 stores an Adler-32 after each chunk) ──
+
+/// A copy of `ewfacquire_clean.E01` with one byte of chunk 1's data flipped.
+/// Chunk 1 starts at file offset 34627 (see `debug_chunk(1)`); its 32 KiB of
+/// zeros are followed by their Adler-32.
+fn clean_e01_with_chunk1_corrupted() -> tempfile::NamedTempFile {
+    let mut bytes = std::fs::read(format!("{DATA_DIR}/ewfacquire_clean.E01")).unwrap();
+    let reader = ewf::EwfReader::open(format!("{DATA_DIR}/ewfacquire_clean.E01")).unwrap();
+    let (offset, _, compressed, _) = reader.debug_chunk(1).unwrap();
+    assert!(!compressed, "the fixture's chunks are stored uncompressed");
+    bytes[offset as usize + 100] ^= 0xFF;
+    let mut tmp = tempfile::Builder::new().suffix(".E01").tempfile().unwrap();
+    std::io::Write::write_all(&mut tmp, &bytes).unwrap();
+    tmp
+}
+
+#[test]
+fn a_corrupted_uncompressed_chunk_is_refused_not_served() {
+    let tmp = clean_e01_with_chunk1_corrupted();
+    let reader = ewf::EwfReader::open(tmp.path()).expect("the image still opens");
+    let mut buf = [0u8; 512];
+    let err = reader
+        .read_at(&mut buf, 32_768)
+        .expect_err("a read from the corrupted chunk must fail");
+    assert!(
+        matches!(err, ewf::EwfError::ChunkChecksum { chunk: 1, .. }),
+        "expected a checksum error for chunk 1, got {err}"
+    );
+}
+
+#[test]
+fn an_intact_chunk_still_reads_beside_a_corrupted_one() {
+    let tmp = clean_e01_with_chunk1_corrupted();
+    let reader = ewf::EwfReader::open(tmp.path()).unwrap();
+    let mut buf = [0xFFu8; 512];
+    reader.read_at(&mut buf, 0).expect("chunk 0 is intact");
+    assert!(buf.iter().all(|&b| b == 0));
+}
