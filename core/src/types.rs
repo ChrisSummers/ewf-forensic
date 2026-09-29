@@ -32,6 +32,7 @@ pub struct VerifyResult {
     pub declared_bytes: u64,
 }
 
+#[cfg(feature = "verify")]
 impl VerifyResult {
     /// Whether the chunk table covers the whole declared media.
     ///
