@@ -329,24 +329,24 @@ fn clean_image_has_no_acquisition_errors() {
     }
 }
 
+/// The section as libewf writes it: a 520-byte header (entry count, 512
+/// unused bytes, Adler-32), the entries, then their Adler-32.
+fn error2_bytes(entries: &[(u32, u32)]) -> Vec<u8> {
+    let mut data = u32::try_from(entries.len()).unwrap().to_le_bytes().to_vec();
+    data.resize(516, 0);
+    data.extend_from_slice(&ewf::sections::adler32(&data).to_le_bytes());
+    let body: Vec<u8> = entries
+        .iter()
+        .flat_map(|(first, count)| [first.to_le_bytes(), count.to_le_bytes()].concat())
+        .collect();
+    data.extend_from_slice(&body);
+    data.extend_from_slice(&ewf::sections::adler32(&body).to_le_bytes());
+    data
+}
+
 #[test]
 fn parse_error2_data_extracts_entries() {
-    // Synthetic error2 section data:
-    // u32 number_of_entries = 2
-    // 4 bytes padding
-    // Entry 1: first_sector=100, sector_count=5
-    // Entry 2: first_sector=5000, sector_count=1
-    // 4 bytes Adler-32 (ignored for now)
-    let mut data = Vec::new();
-    data.extend_from_slice(&2u32.to_le_bytes()); // entry count
-    data.extend_from_slice(&[0u8; 4]); // padding
-    data.extend_from_slice(&100u32.to_le_bytes()); // entry 1 first_sector
-    data.extend_from_slice(&5u32.to_le_bytes()); // entry 1 sector_count
-    data.extend_from_slice(&5000u32.to_le_bytes()); // entry 2 first_sector
-    data.extend_from_slice(&1u32.to_le_bytes()); // entry 2 sector_count
-    data.extend_from_slice(&[0u8; 4]); // checksum placeholder
-
-    let errors = ewf::parse_error2_data(&data);
+    let errors = ewf::parse_error2_data(&error2_bytes(&[(100, 5), (5000, 1)])).unwrap();
     assert_eq!(errors.len(), 2);
     assert_eq!(errors[0].first_sector, 100);
     assert_eq!(errors[0].sector_count, 5);
@@ -356,13 +356,7 @@ fn parse_error2_data_extracts_entries() {
 
 #[test]
 fn parse_error2_data_handles_empty() {
-    // Zero entries
-    let mut data = Vec::new();
-    data.extend_from_slice(&0u32.to_le_bytes());
-    data.extend_from_slice(&[0u8; 4]);
-    data.extend_from_slice(&[0u8; 4]); // checksum
-
-    let errors = ewf::parse_error2_data(&data);
+    let errors = ewf::parse_error2_data(&error2_bytes(&[])).unwrap();
     assert!(errors.is_empty());
 }
 

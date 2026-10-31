@@ -2249,23 +2249,44 @@ mod tests {
     }
 
     #[test]
-    fn parse_error2_data_short_input() {
-        // Fewer than 8 bytes
-        let errors = parse_error2_data(&[0u8; 4]);
-        assert!(errors.is_empty());
+    fn parse_error2_data_reads_entries_after_the_520_byte_header() {
+        let data = crate::parse::error2_bytes(&[(100, 5), (5000, 1)]);
+        let errors = parse_error2_data(&data).unwrap();
+        assert_eq!(
+            errors,
+            [
+                AcquisitionError {
+                    first_sector: 100,
+                    sector_count: 5
+                },
+                AcquisitionError {
+                    first_sector: 5000,
+                    sector_count: 1
+                },
+            ]
+        );
+        assert!(parse_error2_data(&crate::parse::error2_bytes(&[]))
+            .unwrap()
+            .is_empty());
     }
 
+    /// A damaged section records read errors it cannot name; an empty list
+    /// would claim a clean acquisition, so each damage is refused.
     #[test]
-    fn parse_error2_data_truncated_entries() {
-        // Claim 2 entries but only provide space for 1
-        let mut data = Vec::new();
-        data.extend_from_slice(&2u32.to_le_bytes()); // claims 2 entries
-        data.extend_from_slice(&[0u8; 4]); // padding
-        data.extend_from_slice(&100u32.to_le_bytes()); // entry 1 first_sector
-        data.extend_from_slice(&5u32.to_le_bytes()); // entry 1 sector_count
-                                                     // No space for entry 2 — should handle gracefully
-        let errors = parse_error2_data(&data);
-        assert_eq!(errors.len(), 1);
+    fn parse_error2_data_refuses_a_damaged_section() {
+        let good = crate::parse::error2_bytes(&[(100, 5), (5000, 1)]);
+        assert!(parse_error2_data(&good[..519]).is_err(), "short header");
+        let mut header = good.clone();
+        header[4] = 1;
+        assert!(parse_error2_data(&header).is_err(), "header checksum");
+        let mut entries = good.clone();
+        entries[520] ^= 1;
+        assert!(parse_error2_data(&entries).is_err(), "entries checksum");
+        assert!(
+            parse_error2_data(&good[..good.len() - 1]).is_err(),
+            "footer cut"
+        );
+        assert!(parse_error2_data(&good[..530]).is_err(), "entries cut");
     }
 
     // -- reader.rs coverage: v1 synthetic error2 section --
@@ -2288,12 +2309,7 @@ mod tests {
         let compressed = encoder.finish().unwrap();
 
         // error2 section data: 1 entry at sector 42, count 3
-        let mut error2_data = Vec::new();
-        error2_data.extend_from_slice(&1u32.to_le_bytes()); // 1 entry
-        error2_data.extend_from_slice(&[0u8; 4]); // padding
-        error2_data.extend_from_slice(&42u32.to_le_bytes()); // first_sector
-        error2_data.extend_from_slice(&3u32.to_le_bytes()); // sector_count
-        error2_data.extend_from_slice(&[0u8; 4]); // checksum
+        let error2_data = crate::parse::error2_bytes(&[(42, 3)]);
         let error2_size = error2_data.len();
 
         let vol_desc_off: u64 = FILE_HEADER_SIZE as u64;

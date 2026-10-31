@@ -618,16 +618,21 @@ impl EwfReader {
                         let data_size = desc
                             .section_size
                             .saturating_sub(SECTION_DESCRIPTOR_SIZE as u64);
-                        if data_size > 0 && data_size < MAX_SECTION_DATA_SIZE {
-                            file.seek(SeekFrom::Start(data_offset))?;
-                            let mut buf = vec![0u8; data_size as usize];
-                            file.read_exact(&mut buf)?;
-                            acquisition_errors = parse_error2_data(&buf);
-                            log::debug!(
-                                "parsed error2 section: {} entries",
-                                acquisition_errors.len()
-                            );
+                        // An error2 section too large to read is refused rather than
+                        // skipped: skipping it would report a clean acquisition.
+                        if data_size >= MAX_SECTION_DATA_SIZE {
+                            return Err(EwfError::Parse(format!(
+                                "error2 section of {data_size} bytes exceeds the {MAX_SECTION_DATA_SIZE}-byte limit"
+                            )));
                         }
+                        file.seek(SeekFrom::Start(data_offset))?;
+                        let mut buf = vec![0u8; data_size as usize];
+                        file.read_exact(&mut buf)?;
+                        acquisition_errors = parse_error2_data(&buf)?;
+                        log::debug!(
+                            "parsed error2 section: {} entries",
+                            acquisition_errors.len()
+                        );
                     }
                     _ => {}
                 }
